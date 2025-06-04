@@ -42,3 +42,76 @@ A schematic of the pipeline:
 - Combined MSE reconstruction loss and KL divergence:
   ```python
   Loss = MSE(x, x_hat) + β * KL(mu, logvar)
+  ```
+  - Supports β-VAE configurations for disentangled latent spaces
+
+---
+
+## 🚀 Training
+
+- Early stopping with patience and learning rate scheduling
+- `train()` method manages full training lifecycle, including saving best-performing model (`best_airfoil_model.pt`)
+
+---
+
+## 🧬 Generation & Diversity
+
+### 🌱 Sampling & Generation
+- `generate_airfoil()`: Sample from latent space
+- `generate_multiple_airfoils(n)`: Batch generation
+- `interpolate_airfoils(z1, z2)`: Latent space interpolation between two airfoils
+
+### ✅ Quality Validation
+- `validate_airfoil_quality()`: Checks x/y range and geometric smoothness
+
+### 📊 Diversity Analysis
+- `analyze_diversity()`: Computes pairwise Euclidean distances
+- Compares generated airfoils to original dataset using internal diversity metrics and novelty score
+
+---
+
+## 📦 Folder Structure
+
+```
+.
+├── airfoils/                 # Raw .dat airfoil data
+├── generated_airfoils/      # Saved output samples
+├── A_flowchart_style_digital_illustration_diagram_ill.png
+├── README.md
+└── main.py
+```
+
+---
+
+## 🛠 Requirements
+
+```bash
+pip install torch numpy scikit-learn matplotlib scipy
+```
+
+---
+
+## 📌 Citation
+
+If you use this project, please cite as:
+
+```
+Tokyay, E. (2025). Synthetic Airfoil Generation using Neural Reinforced Transformers [Code]. GitHub.
+```
+
+---
+
+## 🧠 Future Work
+
+- Integration of Transformer layers in latent space modeling
+- Conditional airfoil generation (e.g., based on performance metrics)
+- CFD or surrogate model coupling for fitness-based filtering
+
+---
+
+## 📬 Contact
+
+Maintained by **Ensar Tokyay**  
+[LinkedIn](https://www.linkedin.com/) • [GitHub](https://github.com/yourusername)
+
+---
