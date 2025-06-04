@@ -69,7 +69,7 @@ A schematic of the pipeline:
 - Compares generated airfoils to original dataset using internal diversity metrics and novelty score
 
 ---
-
+![Example Output Which is not optimized yet](https://github.com/MEO41/Synthetic_Airfoil_Generator/blob/main/assets/example_output.jpg?raw=true)
 ## 📦 Folder Structure
 
 ```
