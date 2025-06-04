@@ -13,7 +13,7 @@ The project enables:
 
 A schematic of the pipeline:
 
-![Pipeline Diagram](asssets/A_flowchart_style_digital_illustration_diagram_ill.png)
+![Pipeline Diagram](https://github.com/MEO41/Synthetic_Airfoil_Generator/blob/main/assets/A_flowchart_style_digital_illustration_diagram_ill.png?raw=true)
 
 
 ---
