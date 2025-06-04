@@ -74,7 +74,7 @@ A schematic of the pipeline:
 
 ```
 .
-├── airfoils/                 # Raw .dat airfoil data
+├── airfoils/                 # Raw .dat airfoil data !!! our data set is not been published to github yet
 ├── generated_airfoils/      # Saved output samples
 ├── A_flowchart_style_digital_illustration_diagram_ill.png
 ├── README.md
