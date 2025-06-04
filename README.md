@@ -96,7 +96,7 @@ pip install torch numpy scikit-learn matplotlib scipy
 If you use this project, please cite as:
 
 ```
-Tokyay, E. (2025). Synthetic Airfoil Generation using Neural Reinforced Transformers [Code]. GitHub.
+ONAY, M. (2025). Synthetic Airfoil Generation using Neural Reinforced Transformers [Code]. GitHub.
 ```
 
 ---
@@ -104,14 +104,14 @@ Tokyay, E. (2025). Synthetic Airfoil Generation using Neural Reinforced Transfor
 ## 🧠 Future Work
 
 - Integration of Transformer layers in latent space modeling
-- Conditional airfoil generation (e.g., based on performance metrics)
+- Conditional airfoil generation (e.g., based on performance metrics) + neuralairfoil
 - CFD or surrogate model coupling for fitness-based filtering
 
 ---
 
 ## 📬 Contact
 
-Maintained by **Ensar Tokyay**  
-[LinkedIn](https://www.linkedin.com/) • [GitHub](https://github.com/yourusername)
+Maintained by **Muhammed Emin ONAY**  
+[LinkedIn](www.linkedin.com/in/muhammed-emin-onay-02328129a) • [GitHub](https://github.com/MEO41)
 
 ---
