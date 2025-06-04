@@ -15,61 +15,115 @@ warnings.filterwarnings('ignore')
 class Config:
     """Centralized configuration for VAE Airfoil Generator"""
     
-    # Data Configuration
-    DATA_FOLDER = 'airfoils'
-    TARGET_POINTS = 200
-    TRAIN_TEST_SPLIT = 0.2
-    RANDOM_SEED = 42
-    
-    # Model Architecture
-    LATENT_DIM = 48
-    HIDDEN_DIM = 256
-    DROPOUT_RATE = 0.2
-    
-    # Training Parameters
-    EPOCHS = 500
-    BATCH_SIZE = 64
-    LEARNING_RATE = 0.001
-    BETA = 0.5  # VAE beta parameter for KL divergence weighting
-    PATIENCE = 100  # Early stopping patience
-    
-    # Learning Rate Scheduler
-    SCHEDULER_PATIENCE = 10
-    SCHEDULER_FACTOR = 0.5
-    
-    # Generation Parameters
-    DEFAULT_TEMPERATURE = 1.5
-    NUM_GENERATED_AIRFOILS = 12
-    DIVERSITY_METHOD = 'mixed'  # 'temperature', 'spherical', 'clustered', 'mixed'
-    
-    # Temperature Sampling Range
-    TEMP_MIN = 0.8
-    TEMP_MAX = 2.5
-    
-    # Spherical Sampling
-    SPHERICAL_RADIUS_MIN = 1.5
-    SPHERICAL_RADIUS_MAX = 3.0
-    
-    # High Variance Sampling
-    HIGH_VAR_STD = 2.0
-    
-    # Quality Validation Thresholds
-    MIN_X_RANGE = 0.5
-    MIN_Y_RANGE = 0.05
-    MAX_JUMP_THRESHOLD = 0.5
-    
-    # Diversity Analysis
-    DIVERSITY_SAMPLE_SIZE = 100
-    NOVELTY_THRESHOLD_RATIO = 0.1
-    
-    # Output Settings
-    OUTPUT_FOLDER = 'generated_airfoils'
-    MODEL_SAVE_PATH = 'best_airfoil_model.pt'
-    PLOT_AIRFOILS_COUNT = 6
-    INTERPOLATION_STEPS = 6
-    
-    # Device Selection
-    USE_CUDA = True  # Set to False to force CPU usage
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 1. DATA CONFIGURATION
+    # ──────────────────────────────────────────────────────────────────────────────
+    DATA_FOLDER         = 'airfoils'       # Path to folder containing .dat files
+    TARGET_POINTS       = 50             # Number of (x,y) samples per airfoil (100 is usually enough)
+    TRAIN_TEST_SPLIT    = 0.20             # 80/20 train/validation
+    RANDOM_SEED         = 42               # For reproducibility (NumPy, PyTorch, etc.)
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 2. MODEL ARCHITECTURE
+    # ──────────────────────────────────────────────────────────────────────────────
+    LATENT_DIM          = 48               # 48–64 dims gives good capacity on ~1,600 airfoils
+    HIDDEN_DIM          = 256              # Hidden‐layer size in MLP encoder/decoder
+    DROPOUT_RATE        = 0.2              # Dropout to regularize and avoid overfitting
+
+    # If you want to try a small Conv1D front‐end, you could set a flag here:
+    USE_CONV_FRONTEND   = False            # Set True if you add Conv1D layers to encoder
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 3. TRAINING PARAMETERS
+    # ──────────────────────────────────────────────────────────────────────────────
+    EPOCHS              = 1000             # Train up to 1000 epochs; early stopping will usually stop earlier
+    BATCH_SIZE          = 64               # ~26 updates/epoch; balances stability and GPU usage
+    LEARNING_RATE       = 5e-4             # 5e-4 with a scheduler is a good “medium‐fast” LR
+    BETA                = 1.0              # Start at β=1.0 to encourage wider latent spread
+    PATIENCE            = 100              # Wait 100 epochs of no‐improvement before stopping
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 4. LR SCHEDULER
+    # ──────────────────────────────────────────────────────────────────────────────
+    SCHEDULER_PATIENCE  = 10               # When val_loss hasn’t improved for 10 epochs → LR *= SCHEDULER_FACTOR
+    SCHEDULER_FACTOR    = 0.5              # Halve the LR when plateau is detected
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 5. GENERATION PARAMETERS
+    # ──────────────────────────────────────────────────────────────────────────────
+    DEFAULT_TEMPERATURE   = 1.5            # Typical “temp” to sample from N(0,1)*1.5
+    NUM_GENERATED_AIRFOILS = 6           # Generate a large pool (e.g. 100) so you can filter & pick top k
+    #   (You can later down‐select to PLOT_AIRFOILS_COUNT or whatever you need.)
+
+    DIVERSITY_METHOD     = 'mixed'         # Combined strategy: 'temperature', 'spherical', 'clustered', or 'mixed'
+    # If you prefer to emphasize “k‐means” clustering on real μ’s, you can set DIVERSITY_METHOD='clustered'
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 6. TEMPERATURE SAMPLING RANGE (for the 'mixed' or 'temperature' methods)
+    # ──────────────────────────────────────────────────────────────────────────────
+    TEMP_MIN             = 0.8             # Avoid sampling too close to origin (overly “average” shapes)
+    TEMP_MAX             = 2.5             # Avoid sampling too far out (too many invalid shapes)
+    # You can grid‐search among a few ranges, e.g., (0.7,2.2), (0.8,2.5), (1.0,3.0) to see which yields highest diversity.
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 7. SPHERICAL SAMPLING (for the 'mixed' or 'spherical' methods)
+    # ──────────────────────────────────────────────────────────────────────────────
+    SPHERICAL_RADIUS_MIN = 1.5             # Minimum radial distance from origin in latent space
+    SPHERICAL_RADIUS_MAX = 3.0             # Maximum radial distance
+    # Sampling: z = normalize(randn(latent_dim)) * uniform(SPHERICAL_RADIUS_MIN, SPHERICAL_RADIUS_MAX)
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 8. HIGH‐VARIANCE (GAUSSIAN) SAMPLING (for the 'mixed' or 'clustered' methods)
+    # ──────────────────────────────────────────────────────────────────────────────
+    HIGH_VAR_STD         = 2.0             # Standard deviation when sampling z ∼ N(0, HIGH_VAR_STD²)
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 9. QUALITY VALIDATION THRESHOLDS
+    # ──────────────────────────────────────────────────────────────────────────────
+    MIN_X_RANGE          = 0.5             # Require chordwise span ≥ 0.5 before deeming “valid”
+    MIN_Y_RANGE          = 0.03            # Slightly lower than 0.05, since some thin foils might only be 0.03c
+    MAX_JUMP_THRESHOLD   = 0.5             # No two adjacent points should jump more than 0.5 (in normalized units)
+    # You can also add a monotonicity check on x: ensure np.all(np.diff(xs) >= -1e-6) in validate().
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 10. DIVERSITY ANALYSIS
+    # ──────────────────────────────────────────────────────────────────────────────
+    DIVERSITY_SAMPLE_SIZE   = 200          # Compare generated → original against a random sample of 200 originals
+    NOVELTY_THRESHOLD_RATIO = 0.10         # A generated airfoil is “novel” if its nearest‐neighbor distance > 10% of orig_mean_dist
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 11. OUTPUT SETTINGS
+    # ──────────────────────────────────────────────────────────────────────────────
+    OUTPUT_FOLDER       = 'generated_airfoils'       # Where to save .dat files
+    MODEL_SAVE_PATH     = 'best_airfoil_model.pt'    # Where to checkpoint the best VAE
+    PLOT_AIRFOILS_COUNT = 6                         # How many to visualize (subplot grid: 2×3)
+    INTERPOLATION_STEPS = 6                         # Number of steps when showing latent interpolation
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 12. DEVICE SELECTION
+    # ──────────────────────────────────────────────────────────────────────────────
+    USE_CUDA              = True            # If False, force torch.device('cpu')
+    # You can override at runtime: torch.device('cuda' if USE_CUDA and cuda_available else 'cpu')
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # 13. OPTIONAL TUNING GRID (for automated search)
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Below is an example of how you could organize a small grid‐search over key hyperparams.
+    # You don’t have to use it, but it’s provided as a template if you want to systematically search.
+    #
+    # HYPERPARAM_GRID = {
+    #     'LATENT_DIM': [32, 48, 64],
+    #     'BETA': [0.5, 1.0, 2.0],
+    #     'LEARNING_RATE': [1e-3, 5e-4, 1e-4],
+    #     'TEMP_RANGE': [(0.8,2.2), (1.0,2.5), (1.2,3.0)]
+    # }
+    #
+    # For each combination, you would re‐train the VAE (on the same train/val split) and record:
+    #   - Validation MSE
+    #   - Latent variance profile (how many dims are active)
+    #   - Sampling yield (what % of z’s produce valid curves)
+    #   - Mean pairwise diversity among the top‐k valid shapes
+    # Then choose the combination that best balances those metrics.
     
     @classmethod
     def print_config(cls):
