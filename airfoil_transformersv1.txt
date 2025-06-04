@@ -1,0 +1,260 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+from pathlib import Path
+import re
+
+class AirfoilDataset(Dataset):
+    def __init__(self, data, sequence_length=100):
+        self.data = data
+        self.sequence_length = sequence_length
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        airfoil = self.data[idx]
+        # Pad or truncate to sequence_length
+        if len(airfoil) < self.sequence_length:
+            padded = np.zeros((self.sequence_length, 2))
+            padded[:len(airfoil)] = airfoil
+            airfoil = padded
+        else:
+            airfoil = airfoil[:self.sequence_length]
+        
+        return torch.FloatTensor(airfoil)
+
+class AirfoilTransformer(nn.Module):
+    def __init__(self, input_dim=2, d_model=128, nhead=8, num_layers=6, dim_feedforward=512):
+        super(AirfoilTransformer, self).__init__()
+        self.d_model = d_model
+        self.input_projection = nn.Linear(input_dim, d_model)
+        self.pos_encoding = nn.Parameter(torch.randn(1000, d_model))
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=nhead, 
+            dim_feedforward=dim_feedforward,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.output_projection = nn.Linear(d_model, input_dim)
+        
+    def forward(self, x):
+        seq_len = x.size(1)
+        x = self.input_projection(x)
+        x = x + self.pos_encoding[:seq_len]
+        x = self.transformer(x)
+        x = self.output_projection(x)
+        return x
+
+class AirfoilGenerator:
+    def __init__(self, data_folder='airfoils', sequence_length=100):
+        self.data_folder = data_folder
+        self.sequence_length = sequence_length
+        self.scaler = MinMaxScaler()
+        self.model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+    def load_dat_file(self, filepath):
+        """Load airfoil coordinates from .dat file"""
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+            
+            # Skip header line if present
+            start_idx = 0
+            for i, line in enumerate(lines):
+                if re.match(r'^[-+]?\d*\.?\d+\s+[-+]?\d*\.?\d+', line.strip()):
+                    start_idx = i
+                    break
+            
+            coords = []
+            for line in lines[start_idx:]:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            x, y = float(parts[0]), float(parts[1])
+                            coords.append([x, y])
+                        except ValueError:
+                            continue
+            
+            return np.array(coords)
+        except Exception as e:
+            print(f"Error loading {filepath}: {e}")
+            return None
+    
+    def load_data(self):
+        """Load all .dat files from the airfoils folder"""
+        airfoils = []
+        data_path = Path(self.data_folder)
+        
+        if not data_path.exists():
+            raise FileNotFoundError(f"Folder '{self.data_folder}' not found")
+        
+        dat_files = list(data_path.glob('*.dat'))
+        if not dat_files:
+            raise FileNotFoundError(f"No .dat files found in '{self.data_folder}'")
+        
+        print(f"Loading {len(dat_files)} airfoil files...")
+        
+        for filepath in dat_files:
+            coords = self.load_dat_file(filepath)
+            if coords is not None and len(coords) > 5:  # Minimum points
+                airfoils.append(coords)
+                print(f"Loaded {filepath.name}: {len(coords)} points")
+        
+        if not airfoils:
+            raise ValueError("No valid airfoil data loaded")
+        
+        print(f"Successfully loaded {len(airfoils)} airfoils")
+        return airfoils
+    
+    def preprocess_data(self, airfoils):
+        """Normalize and prepare data for training"""
+        # Flatten all coordinates for scaling
+        all_coords = np.vstack(airfoils)
+        self.scaler.fit(all_coords)
+        
+        # Scale each airfoil
+        scaled_airfoils = []
+        for airfoil in airfoils:
+            scaled = self.scaler.transform(airfoil)
+            scaled_airfoils.append(scaled)
+        
+        return scaled_airfoils
+    
+    def train(self, epochs=100, batch_size=8, learning_rate=0.001):
+        """Train the transformer model"""
+        # Load and preprocess data
+        airfoils = self.load_data()
+        scaled_airfoils = self.preprocess_data(airfoils)
+        
+        # Create dataset and dataloader
+        dataset = AirfoilDataset(scaled_airfoils, self.sequence_length)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        # Initialize model
+        self.model = AirfoilTransformer().to(self.device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        criterion = nn.MSELoss()
+        
+        print(f"Training on {self.device}")
+        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        
+        # Training loop
+        self.model.train()
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch in dataloader:
+                batch = batch.to(self.device)
+                
+                optimizer.zero_grad()
+                
+                # Auto-encoder training: input = output
+                output = self.model(batch)
+                loss = criterion(output, batch)
+                
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+            
+            avg_loss = total_loss / len(dataloader)
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.6f}")
+        
+        print("Training completed!")
+    
+    def generate_airfoil(self, noise_level=0.1):
+        """Generate a new airfoil"""
+        if self.model is None:
+            raise ValueError("Model not trained yet. Call train() first.")
+        
+        self.model.eval()
+        with torch.no_grad():
+            # Generate random noise as input
+            noise = torch.randn(1, self.sequence_length, 2).to(self.device) * noise_level
+            generated = self.model(noise)
+            
+            # Convert back to numpy and denormalize
+            generated_np = generated.cpu().numpy()[0]
+            denormalized = self.scaler.inverse_transform(generated_np)
+            
+            return denormalized
+    
+    def generate_multiple_airfoils(self, num_airfoils=5, noise_levels=None):
+        """Generate multiple airfoils with different noise levels"""
+        if noise_levels is None:
+            noise_levels = [0.05, 0.1, 0.15, 0.2, 0.25]
+        
+        airfoils = []
+        for i in range(num_airfoils):
+            noise_level = noise_levels[i % len(noise_levels)]
+            airfoil = self.generate_airfoil(noise_level)
+            airfoils.append(airfoil)
+        
+        return airfoils
+    
+    def plot_airfoils(self, airfoils, title="Generated Airfoils"):
+        """Plot multiple airfoils"""
+        plt.figure(figsize=(12, 8))
+        
+        for i, airfoil in enumerate(airfoils):
+            plt.subplot(2, 3, i + 1)
+            plt.plot(airfoil[:, 0], airfoil[:, 1], 'b-', linewidth=2)
+            plt.axis('equal')
+            plt.grid(True, alpha=0.3)
+            plt.title(f'Airfoil {i+1}')
+            plt.xlabel('x/c')
+            plt.ylabel('y/c')
+        
+        plt.tight_layout()
+        plt.suptitle(title)
+        plt.show()
+    
+    def save_airfoil(self, airfoil, filename):
+        """Save generated airfoil to .dat file"""
+        with open(filename, 'w') as f:
+            f.write(f"Generated Airfoil\n")
+            for x, y in airfoil:
+                f.write(f"{x:.6f} {y:.6f}\n")
+        print(f"Saved airfoil to {filename}")
+
+# Usage example
+def main():
+    # Initialize the generator
+    generator = AirfoilGenerator(data_folder='airfoils', sequence_length=100)
+    
+    try:
+        # Train the model
+        print("Starting training...")
+        generator.train(epochs=100, batch_size=4, learning_rate=0.001)
+        
+        # Generate new airfoils
+        print("\nGenerating new airfoils...")
+        new_airfoils = generator.generate_multiple_airfoils(num_airfoils=6)
+        
+        # Plot the results
+        generator.plot_airfoils(new_airfoils, "AI-Generated Airfoils")
+        
+        # Save generated airfoils
+        os.makedirs('generated_airfoils', exist_ok=True)
+        for i, airfoil in enumerate(new_airfoils):
+            filename = f'generated_airfoils/generated_airfoil_{i+1}.dat'
+            generator.save_airfoil(airfoil, filename)
+        
+        print(f"\nGenerated {len(new_airfoils)} new airfoils!")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        print("Make sure you have .dat files in the 'airfoils' folder")
+
+if __name__ == "__main__":
+    main()

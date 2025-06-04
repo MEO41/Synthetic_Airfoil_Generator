@@ -1,0 +1,499 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from pathlib import Path
+import re
+from scipy import interpolate
+import warnings
+warnings.filterwarnings('ignore')
+
+class AirfoilDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        return torch.FloatTensor(self.data[idx])
+
+class AirfoilVAE(nn.Module):
+    def __init__(self, input_dim=200, latent_dim=32, hidden_dim=256):
+        super(AirfoilVAE, self).__init__()
+        self.latent_dim = latent_dim
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim//2, hidden_dim//4),
+            nn.ReLU()
+        )
+        
+        self.fc_mu = nn.Linear(hidden_dim//4, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim//4, latent_dim)
+        
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim//4),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim//4, hidden_dim//2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim//2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+            nn.Tanh()  # Ensures output is bounded
+        )
+        
+    def encode(self, x):
+        h = self.encoder(x.view(x.size(0), -1))
+        return self.fc_mu(h), self.fc_logvar(h)
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z):
+        return self.decoder(z)
+    
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), mu, logvar
+
+def resample_airfoil(coords, target_points=100):
+    """Resample airfoil to exactly target_points using arc length parameterization"""
+    if len(coords) < 3:
+        return None
+    
+    # Calculate cumulative arc length
+    diffs = np.diff(coords, axis=0)
+    segment_lengths = np.sqrt(np.sum(diffs**2, axis=1))
+    arc_lengths = np.concatenate([[0], np.cumsum(segment_lengths)])
+    
+    # Normalize arc length to [0, 1]
+    total_length = arc_lengths[-1]
+    if total_length == 0:
+        return None
+    arc_lengths = arc_lengths / total_length
+    
+    # Create interpolation functions
+    try:
+        fx = interpolate.interp1d(arc_lengths, coords[:, 0], kind='cubic', bounds_error=False, fill_value='extrapolate')
+        fy = interpolate.interp1d(arc_lengths, coords[:, 1], kind='cubic', bounds_error=False, fill_value='extrapolate')
+        
+        # Sample at uniform intervals
+        uniform_s = np.linspace(0, 1, target_points)
+        resampled_x = fx(uniform_s)
+        resampled_y = fy(uniform_s)
+        
+        return np.column_stack([resampled_x, resampled_y])
+    except:
+        return None
+
+class AirfoilGenerator:
+    def __init__(self, data_folder='airfoils', target_points=100, latent_dim=32):
+        self.data_folder = data_folder
+        self.target_points = target_points
+        self.latent_dim = latent_dim
+        self.scaler = MinMaxScaler()
+        self.model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+    def load_dat_file(self, filepath):
+        """Load airfoil coordinates from .dat file"""
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+            
+            start_idx = 0
+            for i, line in enumerate(lines):
+                if re.match(r'^[-+]?\d*\.?\d+\s+[-+]?\d*\.?\d+', line.strip()):
+                    start_idx = i
+                    break
+            
+            coords = []
+            for line in lines[start_idx:]:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            x, y = float(parts[0]), float(parts[1])
+                            coords.append([x, y])
+                        except ValueError:
+                            continue
+            
+            return np.array(coords)
+        except Exception as e:
+            print(f"Error loading {filepath}: {e}")
+            return None
+    
+    def load_and_preprocess_data(self):
+        """Load all .dat files and resample to consistent point count"""
+        data_path = Path(self.data_folder)
+        if not data_path.exists():
+            raise FileNotFoundError(f"Folder '{self.data_folder}' not found")
+        
+        dat_files = list(data_path.glob('*.dat'))
+        if not dat_files:
+            raise FileNotFoundError(f"No .dat files found in '{self.data_folder}'")
+        
+        print(f"Loading and resampling {len(dat_files)} airfoil files...")
+        
+        airfoils = []
+        for filepath in dat_files:
+            coords = self.load_dat_file(filepath)
+            if coords is not None and len(coords) > 5:
+                resampled = resample_airfoil(coords, self.target_points)
+                if resampled is not None:
+                    airfoils.append(resampled)
+        
+        if not airfoils:
+            raise ValueError("No valid airfoil data loaded")
+        
+        print(f"Successfully loaded {len(airfoils)} airfoils, each with {self.target_points} points")
+        
+        # Normalize data
+        all_coords = np.vstack(airfoils).reshape(-1, 2)
+        self.scaler.fit(all_coords)
+        
+        scaled_airfoils = []
+        for airfoil in airfoils:
+            scaled = self.scaler.transform(airfoil)
+            scaled_airfoils.append(scaled)
+        
+        return np.array(scaled_airfoils)
+    
+    def vae_loss_function(self, recon_x, x, mu, logvar):
+        """VAE loss: reconstruction + KL divergence"""
+        MSE = nn.MSELoss(reduction='sum')(recon_x, x.view(x.size(0), -1))
+        KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return MSE + 0.1 * KLD  # Beta-VAE with beta=0.1
+    
+    def evaluate_model(self, dataloader):
+        """Evaluate model on validation set"""
+        self.model.eval()
+        total_loss = 0
+        with torch.no_grad():
+            for batch in dataloader:
+                batch = batch.to(self.device)
+                recon_batch, mu, logvar = self.model(batch)
+                loss = self.vae_loss_function(recon_batch, batch, mu, logvar)
+                total_loss += loss.item()
+        return total_loss / len(dataloader.dataset)
+    
+    def train(self, epochs=200, batch_size=32, learning_rate=0.001, patience=20):
+        """Train VAE with early stopping"""
+        # Load and preprocess data
+        airfoils = self.load_and_preprocess_data()
+        
+        # Train/validation split
+        train_data, val_data = train_test_split(airfoils, test_size=0.2, random_state=42)
+        
+        train_dataset = AirfoilDataset(train_data)
+        val_dataset = AirfoilDataset(val_data)
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        # Initialize model
+        input_dim = self.target_points * 2
+        self.model = AirfoilVAE(input_dim=input_dim, latent_dim=self.latent_dim).to(self.device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+        
+        print(f"Training on {self.device}")
+        print(f"Dataset: {len(train_data)} train, {len(val_data)} validation")
+        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        
+        # Training with early stopping
+        best_val_loss = float('inf')
+        no_improve = 0
+        
+        for epoch in range(epochs):
+            # Training
+            self.model.train()
+            train_loss = 0
+            for batch in train_loader:
+                batch = batch.to(self.device)
+                optimizer.zero_grad()
+                
+                recon_batch, mu, logvar = self.model(batch)
+                loss = self.vae_loss_function(recon_batch, batch, mu, logvar)
+                
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            
+            # Validation
+            val_loss = self.evaluate_model(val_loader)
+            scheduler.step(val_loss)
+            
+            avg_train_loss = train_loss / len(train_loader.dataset)
+            
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            
+            # Early stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(self.model.state_dict(), 'best_airfoil_model.pt')
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+        
+        # Load best model
+        self.model.load_state_dict(torch.load('best_airfoil_model.pt'))
+        print(f"Training completed! Best validation loss: {best_val_loss:.4f}")
+    
+    def generate_airfoil(self, z=None):
+        """Generate airfoil from latent vector"""
+        if self.model is None:
+            raise ValueError("Model not trained yet. Call train() first.")
+        
+        self.model.eval()
+        with torch.no_grad():
+            if z is None:
+                z = torch.randn(1, self.latent_dim).to(self.device)
+            else:
+                z = torch.FloatTensor(z).unsqueeze(0).to(self.device)
+            
+            generated = self.model.decode(z)
+            generated_np = generated.cpu().numpy().reshape(self.target_points, 2)
+            denormalized = self.scaler.inverse_transform(generated_np)
+            
+            return denormalized
+    
+    def generate_multiple_airfoils(self, num_airfoils=6):
+        """Generate multiple diverse airfoils"""
+        airfoils = []
+        for _ in range(num_airfoils):
+            airfoil = self.generate_airfoil()
+            airfoils.append(airfoil)
+        return airfoils
+    
+    def interpolate_airfoils(self, z1, z2, steps=5):
+        """Generate airfoils by interpolating between two latent vectors"""
+        airfoils = []
+        for alpha in np.linspace(0, 1, steps):
+            z_interp = (1 - alpha) * z1 + alpha * z2
+            airfoil = self.generate_airfoil(z_interp)
+            airfoils.append(airfoil)
+        return airfoils
+    
+    def validate_airfoil_quality(self, airfoil):
+        """Basic quality checks for generated airfoils"""
+        # Check for reasonable coordinate ranges
+        x_range = airfoil[:, 0].max() - airfoil[:, 0].min()
+        y_range = airfoil[:, 1].max() - airfoil[:, 1].min()
+        
+        # Check for smoothness (no sharp discontinuities)
+        diffs = np.diff(airfoil, axis=0)
+        max_jump = np.max(np.sqrt(np.sum(diffs**2, axis=1)))
+        
+        return {
+            'x_range': x_range,
+            'y_range': y_range,
+            'max_jump': max_jump,
+            'is_valid': x_range > 0.5 and y_range > 0.05 and max_jump < 0.5
+        }
+    
+    def plot_airfoils(self, airfoils, title="Generated Airfoils", validate=True):
+        """Plot multiple airfoils with quality assessment"""
+        plt.figure(figsize=(15, 10))
+        
+        for i, airfoil in enumerate(airfoils[:6]):
+            plt.subplot(2, 3, i + 1)
+            plt.plot(airfoil[:, 0], airfoil[:, 1], 'b-', linewidth=2)
+            plt.axis('equal')
+            plt.grid(True, alpha=0.3)
+            
+            if validate:
+                quality = self.validate_airfoil_quality(airfoil)
+                status = "✓" if quality['is_valid'] else "✗"
+                plt.title(f'Airfoil {i+1} {status}')
+            else:
+                plt.title(f'Airfoil {i+1}')
+            
+            plt.xlabel('x/c')
+            plt.ylabel('y/c')
+        
+        plt.tight_layout()
+        plt.suptitle(title, y=1.02)
+        plt.show()
+    
+    def save_airfoil(self, airfoil, filename):
+        """Save generated airfoil to .dat file"""
+        with open(filename, 'w') as f:
+            f.write(f"Generated Airfoil - VAE Model\n")
+            for x, y in airfoil:
+                f.write(f"{x:.6f} {y:.6f}\n")
+    
+    def calculate_airfoil_distance(self, airfoil1, airfoil2):
+        """Calculate Euclidean distance between two airfoils"""
+        return np.sqrt(np.sum((airfoil1 - airfoil2)**2))
+    
+    def calculate_variance_matrix(self, airfoils):
+        """Calculate pairwise distances between airfoils"""
+        n = len(airfoils)
+        distance_matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(i+1, n):
+                dist = self.calculate_airfoil_distance(airfoils[i], airfoils[j])
+                distance_matrix[i, j] = dist
+                distance_matrix[j, i] = dist
+        
+        return distance_matrix
+    
+    def analyze_diversity(self, generated_airfoils, original_dataset=None):
+        """Analyze diversity within generated airfoils and against original dataset"""
+        print("\n=== DIVERSITY ANALYSIS ===")
+        
+        # Internal diversity (generated airfoils vs each other)
+        gen_distances = self.calculate_variance_matrix(generated_airfoils)
+        gen_mean_dist = np.mean(gen_distances[np.triu_indices_from(gen_distances, k=1)])
+        gen_std_dist = np.std(gen_distances[np.triu_indices_from(gen_distances, k=1)])
+        
+        print(f"Generated Airfoils Internal Diversity:")
+        print(f"  Mean pairwise distance: {gen_mean_dist:.4f}")
+        print(f"  Std pairwise distance:  {gen_std_dist:.4f}")
+        print(f"  Distance range: {gen_distances.max():.4f} - {gen_distances.min():.4f}")
+        
+        # Compare against original dataset if provided
+        if original_dataset is not None:
+            print(f"\nComparing against original dataset ({len(original_dataset)} airfoils):")
+            
+            # Sample subset of original dataset for computational efficiency
+            sample_size = min(100, len(original_dataset))
+            orig_sample = np.random.choice(len(original_dataset), sample_size, replace=False)
+            sampled_originals = [original_dataset[i] for i in orig_sample]
+            
+            # Calculate distances from generated to original
+            gen_to_orig_distances = []
+            for gen_airfoil in generated_airfoils:
+                distances_to_orig = [self.calculate_airfoil_distance(gen_airfoil, orig) 
+                                   for orig in sampled_originals]
+                min_dist = min(distances_to_orig)
+                gen_to_orig_distances.append(min_dist)
+            
+            mean_nearest_dist = np.mean(gen_to_orig_distances)
+            
+            # Calculate original dataset internal diversity for comparison
+            orig_distances = self.calculate_variance_matrix(sampled_originals)
+            orig_mean_dist = np.mean(orig_distances[np.triu_indices_from(orig_distances, k=1)])
+            
+            print(f"  Mean distance to nearest original: {mean_nearest_dist:.4f}")
+            print(f"  Original dataset internal diversity: {orig_mean_dist:.4f}")
+            print(f"  Novelty ratio (gen/orig diversity): {gen_mean_dist/orig_mean_dist:.2f}")
+            
+            # Assess novelty
+            novelty_threshold = orig_mean_dist * 0.1  # 10% of original diversity
+            novel_count = sum(1 for d in gen_to_orig_distances if d > novelty_threshold)
+            print(f"  Novel airfoils (>{novelty_threshold:.4f} from originals): {novel_count}/{len(generated_airfoils)}")
+        
+        return {
+            'internal_mean_distance': gen_mean_dist,
+            'internal_std_distance': gen_std_dist,
+            'distance_matrix': gen_distances,
+            'gen_to_orig_distances': gen_to_orig_distances if original_dataset else None
+        }
+
+def main():
+    # Initialize generator for large dataset
+    generator = AirfoilGenerator(
+        data_folder='airfoils', 
+        target_points=100, 
+        latent_dim=32
+    )
+    
+    try:
+        # Train with parameters suitable for 1600 airfoils
+        print("Starting VAE training...")
+        generator.train(
+            epochs=1000,          # Train up to 1k epochs; we expect early stop well before that.
+            batch_size=64,        # ~25 updates per epoch; stable gradients.
+            learning_rate=5e-4,   # Start at 5e-4. Use ReduceLROnPlateau to cut LR if validation plateaus.
+            patience=100          # If val_loss doesn’t improve for 100 epochs, stop early.
+        )
+
+        
+        # Store original dataset for comparison
+        original_airfoils = generator.load_and_preprocess_data()
+        original_denormalized = []
+        for airfoil in original_airfoils:
+            denorm = generator.scaler.inverse_transform(airfoil)
+            original_denormalized.append(denorm)
+        
+        # Generate and validate new airfoils
+        print("\nGenerating new airfoils...")
+        new_airfoils = generator.generate_multiple_airfoils(num_airfoils=24)  # More for better analysis
+        
+        # Quality assessment
+        valid_count = 0
+        valid_airfoils = []
+        for i, airfoil in enumerate(new_airfoils):
+            quality = generator.validate_airfoil_quality(airfoil)
+            if quality['is_valid']:
+                valid_count += 1
+                valid_airfoils.append(airfoil)
+            print(f"Airfoil {i+1}: Valid={quality['is_valid']}, "
+                  f"X-range={quality['x_range']:.3f}, "
+                  f"Y-range={quality['y_range']:.3f}")
+        
+        print(f"\nGeneration success rate: {valid_count}/{len(new_airfoils)} ({valid_count/len(new_airfoils)*100:.1f}%)")
+        
+        # Diversity Analysis
+        diversity_results = generator.analyze_diversity(valid_airfoils, original_denormalized)
+        
+        # Plot results
+        generator.plot_airfoils(valid_airfoils[:6], "AI-Generated Airfoils (VAE)")
+        
+        # Save valid airfoils
+        os.makedirs('generated_airfoils', exist_ok=True)
+        for i, airfoil in enumerate(valid_airfoils):
+            filename = f'generated_airfoils/vaee_airfoil_{i+1}.dat'
+            generator.save_airfoil(airfoil, filename)
+        
+        print(f"Saved {len(valid_airfoils)} valid airfoils to 'generated_airfoils' folder")
+        
+        # Demonstrate latent space interpolation
+        print("\nDemonstrating latent space interpolation...")
+        z1 = np.random.randn(generator.latent_dim)
+        z2 = np.random.randn(generator.latent_dim)
+        interpolated = generator.interpolate_airfoils(z1, z2, steps=6)
+        generator.plot_airfoils(interpolated, "Latent Space Interpolation")
+        
+        # Additional diversity visualization
+        if len(valid_airfoils) > 1:
+            print("\nCreating diversity heatmap...")
+            distance_matrix = diversity_results['distance_matrix']
+            plt.figure(figsize=(8, 6))
+            plt.imshow(distance_matrix, cmap='viridis')
+            plt.colorbar(label='Distance')
+            plt.title('Pairwise Distance Matrix (Generated Airfoils)')
+            plt.xlabel('Airfoil Index')
+            plt.ylabel('Airfoil Index')
+            plt.show()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
